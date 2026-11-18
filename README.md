@@ -47,6 +47,44 @@ request in plain English and the system:
 This meaningfully changes the system's behavior: the AI's answer is *grounded* in
 retrieved catalog data rather than printed alongside a canned list.
 
+### Architecture
+
+```mermaid
+flowchart TD
+    User([User]) -->|"1. natural-language request"| Main["main.py<br/>interactive loop"]
+    CSV[("data/songs.csv<br/>knowledge base")] -->|"load_songs()"| Catalog["Song catalog<br/>(list of dicts)"]
+
+    Main -->|"2. query"| Retriever
+
+    subgraph RAG["MusicRAG pipeline — src/rag.py"]
+        Retriever["RETRIEVER<br/>retrieve(): lexical match<br/>+ intent expansion"]
+        Augmenter["AUGMENTER<br/>_format_context():<br/>build grounding context"]
+        Generator["GENERATOR / AI agent<br/>Google Gemini<br/>(gemini-2.5-flash)"]
+        Fallback["Offline fallback<br/>_offline_answer()<br/>template, no AI"]
+
+        Retriever -->|"3. top-k relevant songs"| Augmenter
+        Augmenter -->|"4a. context + request"| Generator
+        Augmenter -.->|"4b. if no API key"| Fallback
+    end
+
+    Catalog --> Retriever
+    Grounding[/"System-prompt guardrail:<br/>recommend ONLY retrieved songs"/] -.->|"constrains"| Generator
+
+    Generator -->|"5. grounded recommendation"| Output([Recommendation shown to user])
+    Fallback -->|"5. retrieved songs"| Output
+
+    subgraph Check["Testing & human checks on AI output"]
+        Pytest["pytest — tests/test_rag.py<br/>retrieval + grounding tests"]
+        Human["Human reviews the answer<br/>in the interactive loop"]
+    end
+
+    Retriever -.->|"verified by"| Pytest
+    Fallback -.->|"grounding verified by"| Pytest
+    Output -.->|"read & judged by"| Human
+```
+
+The standalone diagram source also lives in [`diagrams/architecture.mmd`](diagrams/architecture.mmd).
+
 ### Enabling AI generation
 
 ```bash

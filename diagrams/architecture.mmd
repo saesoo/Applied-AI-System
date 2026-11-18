@@ -1,25 +1,28 @@
 flowchart TD
     User([User]) -->|"1. natural-language request"| Main["main.py<br/>interactive loop"]
-    CSV[("data/songs.csv<br/>knowledge base")] -->|"load_songs()"| Catalog["Song catalog<br/>(list of dicts)"]
+
+    CSV[("data/songs.csv")] -->|"documents_from_songs()"| Corpus
+    Notes[("data/notes/<br/>*.md, *.txt")] -->|"documents_from_text_dir()"| Corpus
+    Corpus["Document corpus<br/>(multi-source: songs + notes)"]
 
     Main -->|"2. query"| Retriever
 
     subgraph RAG["MusicRAG pipeline — src/rag.py"]
-        Retriever["RETRIEVER<br/>retrieve(): lexical match<br/>+ intent expansion"]
+        Retriever["RETRIEVER<br/>retrieve(): rank all docs<br/>lexical match + intent expansion"]
         Augmenter["AUGMENTER<br/>_format_context():<br/>build grounding context"]
-        Generator["GENERATOR / AI agent<br/>Google Gemini<br/>(gemini-2.5-flash)"]
+        Generator["GENERATOR / AI agent<br/>Google Gemini<br/>(gemini-3.8-flash)"]
         Fallback["Offline fallback<br/>_offline_answer()<br/>template, no AI"]
 
-        Retriever -->|"3. top-k relevant songs"| Augmenter
+        Retriever -->|"3. top-k relevant docs"| Augmenter
         Augmenter -->|"4a. context + request"| Generator
         Augmenter -.->|"4b. if no API key"| Fallback
     end
 
-    Catalog --> Retriever
+    Corpus --> Retriever
     Grounding[/"System-prompt guardrail:<br/>recommend ONLY retrieved songs"/] -.->|"constrains"| Generator
 
     Generator -->|"5. grounded recommendation"| Output([Recommendation shown to user])
-    Fallback -->|"5. retrieved songs"| Output
+    Fallback -->|"5. retrieved docs"| Output
 
     subgraph Check["Testing & human checks on AI output"]
         Pytest["pytest — tests/test_rag.py<br/>retrieval + grounding tests"]

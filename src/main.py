@@ -28,9 +28,14 @@ def main() -> None:
         print("No songs loaded. Check data/songs.csv.")
         return
 
-    rag = MusicRAG(songs)
+    # Build the retrieval corpus from multiple sources: the song catalog plus
+    # any custom reference documents in data/notes/.
+    rag = MusicRAG(songs, notes_dir="data/notes")
 
     print("\n🎵 Music Recommender (RAG mode)")
+    print("Sources indexed: " + ", ".join(
+        f"{src} ({n})" for src, n in rag.sources.items()
+    ))
     if rag.generation_available:
         print("AI generation: ON (grounded in the song catalog)")
     else:

@@ -2,15 +2,23 @@
 Retrieval-Augmented Generation (RAG) for the Music Recommender.
 
 This turns the recommender from "score a fixed preferences dict -> print a list"
-into a system that answers *natural-language* requests grounded in the song
-catalog:
+into a system that answers *natural-language* requests grounded in a corpus
+built from MULTIPLE data sources:
 
-    1. RETRIEVE  - treat data/songs.csv as a knowledge base and pull the songs
-                   most relevant to the user's free-text request.
-    2. AUGMENT   - inject ONLY those retrieved songs into the prompt as context.
+    * the song catalog (data/songs.csv) - one document per song
+    * optional custom text documents (data/notes/*.md|*.txt) - guides, artist
+      bios, playlist notes, or any reference material you drop in
+    * any extra Document objects you pass in programmatically
+
+Pipeline:
+
+    1. RETRIEVE  - rank every document across all sources by relevance to the
+                   user's free-text request.
+    2. AUGMENT   - inject ONLY the retrieved documents into the prompt as
+                   context, tagged by source.
     3. GENERATE  - Google Gemini writes a recommendation that actively uses the
-                   retrieved song data, and is instructed to recommend nothing
-                   that wasn't retrieved (grounding -> no hallucinated songs).
+                   retrieved data, recommends only songs that appear in the
+                   context, and may use the notes as supporting background.
 
 If no Gemini API key is configured, the generation step degrades gracefully
 to a retrieval-only response so the app still runs offline.
@@ -18,9 +26,10 @@ to a retrieval-only response so the app still runs offline.
 
 import os
 import re
+from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Tuple
 
-MODEL = "gemini-2.5-flash"
+MODEL = "gemini-3.8-flash"
 
 # Words that carry no retrieval signal.
 _STOPWORDS = {
@@ -58,20 +67,93 @@ def _tokenize(text: str) -> List[str]:
     return [w for w in re.findall(r"[a-z0-9]+", text.lower()) if w not in _STOPWORDS]
 
 
+@dataclass
+class Document:
+    """
+    A single retrievable unit from any data source.
+
+    `source` labels where it came from ("songs", "notes", or a custom tag),
+    `text` is what retrieval matches against, and `payload` holds the original
+    structured data (the song dict for songs, or the raw text for notes).
+    """
+    doc_id: str
+    source: str
+    title: str
+    text: str
+    payload: Dict = field(default_factory=dict)
+
+
+# --- data-source loaders --------------------------------------------------
+
+def documents_from_songs(songs: List[Dict]) -> List[Document]:
+    """Turn the song catalog (list of dicts) into retrievable documents."""
+    docs = []
+    for song in songs:
+        text = f"{song['title']} {song['artist']} {song['genre']} {song['mood']}"
+        docs.append(
+            Document(
+                doc_id=f"song-{song['id']}",
+                source="songs",
+                title=song["title"],
+                text=text,
+                payload=song,
+            )
+        )
+    return docs
+
+
+def documents_from_text_dir(path: str, source: str = "notes") -> List[Document]:
+    """
+    Load every .md / .txt file in a directory as a custom reference document.
+
+    Each file becomes one document whose full text is searchable. Missing
+    directories are treated as "no documents" so the app still runs.
+    """
+    docs = []
+    if not path or not os.path.isdir(path):
+        return docs
+    for fname in sorted(os.listdir(path)):
+        if not fname.lower().endswith((".md", ".txt")):
+            continue
+        full = os.path.join(path, fname)
+        with open(full, encoding="utf-8") as f:
+            content = f.read().strip()
+        if not content:
+            continue
+        docs.append(
+            Document(
+                doc_id=f"{source}-{fname}",
+                source=source,
+                title=fname.rsplit(".", 1)[0].replace("_", " ").title(),
+                text=content,
+                payload={"text": content, "filename": fname},
+            )
+        )
+    return docs
+
+
 class MusicRAG:
-    """RAG pipeline over a list of song dicts (as produced by load_songs)."""
+    """RAG pipeline over a multi-source document corpus."""
 
     def __init__(
         self,
         songs: List[Dict],
+        notes_dir: Optional[str] = None,
+        documents: Optional[List[Document]] = None,
         client: Optional[object] = None,
         model: str = MODEL,
     ):
-        self.songs = songs
+        # Build the corpus from every configured source.
+        self.corpus: List[Document] = documents_from_songs(songs)
+        self.corpus += documents_from_text_dir(notes_dir) if notes_dir else []
+        self.corpus += documents or []
+
+        # Precompute a token set per document for fast relevance scoring.
+        self._doc_tokens = {
+            doc.doc_id: set(_tokenize(doc.text)) for doc in self.corpus
+        }
+
         self.model = model
-        # Precompute a searchable "document" per song for the retrieval step.
-        self._docs = [self._song_document(song) for song in songs]
-        # Resolve a client lazily; None means run in offline (retrieval-only) mode.
         self.client = client if client is not None else self._make_client()
 
     # --- client setup -----------------------------------------------------
@@ -95,14 +177,15 @@ class MusicRAG:
     def generation_available(self) -> bool:
         return self.client is not None
 
-    # --- retrieval --------------------------------------------------------
+    @property
+    def sources(self) -> Dict[str, int]:
+        """Document count per source, e.g. {'songs': 10, 'notes': 3}."""
+        counts: Dict[str, int] = {}
+        for doc in self.corpus:
+            counts[doc.source] = counts.get(doc.source, 0) + 1
+        return counts
 
-    @staticmethod
-    def _song_document(song: Dict) -> List[str]:
-        """The text we match a query against: the song's categorical metadata."""
-        return _tokenize(
-            f"{song['title']} {song['artist']} {song['genre']} {song['mood']}"
-        )
+    # --- retrieval --------------------------------------------------------
 
     def _expand_query(self, query: str) -> List[str]:
         """Query terms plus any catalog labels implied by intent words."""
@@ -112,31 +195,39 @@ class MusicRAG:
             expanded.extend(_INTENT_HINTS.get(term, []))
         return expanded
 
-    def retrieve(self, query: str, k: int = 4) -> List[Tuple[Dict, float]]:
+    def _score_document(self, doc: Document, terms: List[str]) -> float:
         """
-        Return the top-k (song, relevance) pairs for a natural-language query.
+        Relevance of one document to the expanded query terms.
 
-        Relevance is lexical overlap between the expanded query and each song's
-        genre/mood/title/artist, with genre and mood matches weighted higher
-        since they're the strongest taste signal in this catalog.
+        Song documents weight exact genre/mood matches higher (strongest taste
+        signal). All sources additionally earn points for term presence in their
+        text, so free-text notes are ranked on the same scale.
+        """
+        tokens = self._doc_tokens[doc.doc_id]
+        score = 0.0
+        for term in terms:
+            if doc.source == "songs":
+                if term == doc.payload["genre"].lower():
+                    score += 3.0
+                    continue
+                if term == doc.payload["mood"].lower():
+                    score += 2.5
+                    continue
+            if term in tokens:
+                score += 1.0
+        return score
+
+    def retrieve(self, query: str, k: int = 4) -> List[Tuple[Document, float]]:
+        """
+        Return the top-k (document, relevance) pairs across ALL sources for a
+        natural-language query, best-first.
         """
         terms = self._expand_query(query)
-        ranked: List[Tuple[Dict, float]] = []
-        for song, doc in zip(self.songs, self._docs):
-            score = 0.0
-            for term in terms:
-                if term == song["genre"].lower():
-                    score += 3.0
-                elif term == song["mood"].lower():
-                    score += 2.5
-                elif term in doc:
-                    score += 1.0
-            ranked.append((song, score))
-
+        ranked = [(doc, self._score_document(doc, terms)) for doc in self.corpus]
         ranked.sort(key=lambda pair: pair[1], reverse=True)
 
-        # If nothing matched (e.g. a vague query), fall back to the full catalog
-        # order so the generator still has candidates to work with.
+        # If nothing matched (vague query), fall back to the top of the corpus
+        # so the generator still has candidates to work with.
         if ranked and ranked[0][1] == 0.0:
             return ranked[:k]
         return [pair for pair in ranked if pair[1] > 0][:k]
@@ -144,39 +235,48 @@ class MusicRAG:
     # --- augmentation -----------------------------------------------------
 
     @staticmethod
-    def _format_context(retrieved: List[Tuple[Dict, float]]) -> str:
-        """Render retrieved songs as the grounding context block for the prompt."""
-        lines = []
-        for song, _ in retrieved:
-            lines.append(
-                f"- \"{song['title']}\" by {song['artist']} "
-                f"(genre: {song['genre']}, mood: {song['mood']}, "
-                f"energy: {song['energy']}, tempo: {song['tempo_bpm']} bpm, "
-                f"valence: {song['valence']}, danceability: {song['danceability']}, "
-                f"acousticness: {song['acousticness']})"
+    def _render_document(doc: Document) -> str:
+        """Render one retrieved document as a context line, tagged by source."""
+        if doc.source == "songs":
+            s = doc.payload
+            return (
+                f"- [SONG] \"{s['title']}\" by {s['artist']} "
+                f"(genre: {s['genre']}, mood: {s['mood']}, "
+                f"energy: {s['energy']}, tempo: {s['tempo_bpm']} bpm, "
+                f"valence: {s['valence']}, danceability: {s['danceability']}, "
+                f"acousticness: {s['acousticness']})"
             )
-        return "\n".join(lines)
+        excerpt = " ".join(doc.text.split())
+        if len(excerpt) > 300:
+            excerpt = excerpt[:300].rstrip() + "..."
+        return f"- [{doc.source.upper()}] {doc.title}: {excerpt}"
+
+    def _format_context(self, retrieved: List[Tuple[Document, float]]) -> str:
+        """Render retrieved documents as the grounding context block."""
+        return "\n".join(self._render_document(doc) for doc, _ in retrieved)
 
     # --- generation -------------------------------------------------------
 
     _SYSTEM_PROMPT = (
         "You are a music recommendation assistant for a small catalog. "
-        "You will be given a user's request and a list of CANDIDATE SONGS "
-        "retrieved from the catalog. Recommend ONLY songs from that candidate "
-        "list - never invent songs, artists, or details that are not shown. "
-        "Pick the best matches for the request, order them best-first, and for "
-        "each one give a short reason that references the song's actual "
-        "attributes (genre, mood, energy, tempo, etc.). If none of the "
-        "candidates fit the request well, say so honestly."
+        "You will be given a user's request and RETRIEVED CONTEXT drawn from "
+        "multiple sources: SONG entries from the catalog and optional reference "
+        "NOTES (guides, artist info). Recommend ONLY songs that appear as SONG "
+        "entries in the context - never invent songs, artists, or details that "
+        "are not shown. You may use the NOTES as supporting background to "
+        "explain or justify your picks. Order recommendations best-first, and "
+        "for each one give a short reason that references the song's actual "
+        "attributes (genre, mood, energy, tempo, etc.). If none of the songs "
+        "fit the request well, say so honestly."
     )
 
     def answer(self, query: str, k: int = 4) -> str:
         """
         Full RAG answer to a natural-language query.
 
-        Retrieves relevant songs, augments the prompt with them, and asks Claude
-        to generate a grounded recommendation. Falls back to a retrieval-only
-        response when generation isn't available.
+        Retrieves relevant documents across all sources, augments the prompt
+        with them, and asks Gemini to generate a grounded recommendation. Falls
+        back to a retrieval-only response when generation isn't available.
         """
         retrieved = self.retrieve(query, k=k)
         context = self._format_context(retrieved)
@@ -186,8 +286,8 @@ class MusicRAG:
 
         user_prompt = (
             f"User request: {query}\n\n"
-            f"CANDIDATE SONGS (the only songs you may recommend):\n{context}\n\n"
-            "Recommend the best matches for the request."
+            f"RETRIEVED CONTEXT:\n{context}\n\n"
+            "Recommend the best songs for the request."
         )
 
         try:
@@ -211,14 +311,20 @@ class MusicRAG:
         return text or self._offline_answer(retrieved)
 
     @staticmethod
-    def _offline_answer(retrieved: List[Tuple[Dict, float]]) -> str:
+    def _offline_answer(retrieved: List[Tuple[Document, float]]) -> str:
         """Retrieval-only response used when AI generation is unavailable."""
         if not retrieved:
-            return "No songs in the catalog matched your request."
-        lines = ["Retrieved from the catalog (AI generation unavailable):"]
-        for song, score in retrieved:
-            lines.append(
-                f"  • {song['title']} by {song['artist']} "
-                f"[{song['genre']}/{song['mood']}] (relevance {score:.1f})"
-            )
+            return "Nothing in the corpus matched your request."
+        lines = ["Retrieved from the corpus (AI generation unavailable):"]
+        for doc, score in retrieved:
+            if doc.source == "songs":
+                s = doc.payload
+                lines.append(
+                    f"  • [song] {s['title']} by {s['artist']} "
+                    f"[{s['genre']}/{s['mood']}] (relevance {score:.1f})"
+                )
+            else:
+                lines.append(
+                    f"  • [{doc.source}] {doc.title} (relevance {score:.1f})"
+                )
         return "\n".join(lines)

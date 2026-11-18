@@ -37,29 +37,26 @@ The diagram shows the RAG pipeline that drives the app. A user types a request i
 ```mermaid
 flowchart TD
     User([User]) -->|"1. natural-language request"| Main["main.py<br/>interactive loop"]
-
-    CSV[("data/songs.csv")] -->|"documents_from_songs()"| Corpus
-    Notes[("data/notes/<br/>*.md, *.txt")] -->|"documents_from_text_dir()"| Corpus
-    Corpus["Document corpus<br/>(multi-source: songs + notes)"]
+    CSV[("data/songs.csv<br/>knowledge base")] -->|"load_songs()"| Catalog["Song catalog<br/>(list of dicts)"]
 
     Main -->|"2. query"| Retriever
 
     subgraph RAG["MusicRAG pipeline — src/rag.py"]
-        Retriever["RETRIEVER<br/>retrieve(): rank all docs<br/>lexical match + intent expansion"]
+        Retriever["RETRIEVER<br/>retrieve(): lexical match<br/>+ intent expansion"]
         Augmenter["AUGMENTER<br/>_format_context():<br/>build grounding context"]
-        Generator["GENERATOR / AI agent<br/>Google Gemini<br/>(gemini-3.8-flash)"]
+        Generator["GENERATOR / AI agent<br/>Google Gemini<br/>(gemini-2.5-flash)"]
         Fallback["Offline fallback<br/>_offline_answer()<br/>template, no AI"]
 
-        Retriever -->|"3. top-k relevant docs"| Augmenter
+        Retriever -->|"3. top-k relevant songs"| Augmenter
         Augmenter -->|"4a. context + request"| Generator
         Augmenter -.->|"4b. if no API key"| Fallback
     end
 
-    Corpus --> Retriever
+    Catalog --> Retriever
     Grounding[/"System-prompt guardrail:<br/>recommend ONLY retrieved songs"/] -.->|"constrains"| Generator
 
     Generator -->|"5. grounded recommendation"| Output([Recommendation shown to user])
-    Fallback -->|"5. retrieved docs"| Output
+    Fallback -->|"5. retrieved songs"| Output
 
     subgraph Check["Testing & human checks on AI output"]
         Pytest["pytest — tests/test_rag.py<br/>retrieval + grounding tests"]
@@ -163,12 +160,9 @@ Energy is close to your target (0.82 vs 0.8)
 Gym Hero - Score: 34.57
 Because: Genre matches your preferred 'pop'; Energy is close to your target (0.93 vs 0.8)
 ```
-
-**Screenshot or video** *(optional)*: <!-- Insert a screenshot or demo video link here -->
-
 ---
 
-## Experiments You Tried
+## Experiments
 
 - **Partial vs. full taste profiles**: `score_song` only scores the preference keys that are present in `user_prefs`, so a minimal profile (just `genre`, `mood`, `energy`) and a full profile (adding `tempo_bpm`, `valence`, `danceability`, `acousticness`) both work without errors. The minimal profile produces lower, more tightly clustered scores since fewer points are available to earn; the full profile spreads scores out more and rewards songs that match on every dimension (see the two sample runs above — `Sunrise City` scores 55.78 on the minimal profile vs. 99.08 on the full one).
 - **Weighting categorical vs. numeric features**: genre (25 pts) and mood (20 pts) together are worth as much as all five numeric features combined (11 pts each, 55 pts total). This means a song that matches genre and mood but drifts on every numeric target can still outrank a song with perfect numeric alignment but the wrong genre — e.g. `Gym Hero` (pop, but mismatched mood/tempo) outscores `Night Drive Loop` and `Storm Runner` (right energy, wrong genre) in the sample output.

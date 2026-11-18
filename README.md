@@ -37,26 +37,29 @@ The diagram shows the RAG pipeline that drives the app. A user types a request i
 ```mermaid
 flowchart TD
     User([User]) -->|"1. natural-language request"| Main["main.py<br/>interactive loop"]
-    CSV[("data/songs.csv<br/>knowledge base")] -->|"load_songs()"| Catalog["Song catalog<br/>(list of dicts)"]
+
+    CSV[("data/songs.csv")] -->|"documents_from_songs()"| Corpus
+    Notes[("data/notes/<br/>*.md, *.txt")] -->|"documents_from_text_dir()"| Corpus
+    Corpus["Document corpus<br/>(multi-source: songs + notes)"]
 
     Main -->|"2. query"| Retriever
 
     subgraph RAG["MusicRAG pipeline — src/rag.py"]
-        Retriever["RETRIEVER<br/>retrieve(): lexical match<br/>+ intent expansion"]
+        Retriever["RETRIEVER<br/>retrieve(): rank all docs<br/>lexical match + intent expansion"]
         Augmenter["AUGMENTER<br/>_format_context():<br/>build grounding context"]
-        Generator["GENERATOR / AI agent<br/>Google Gemini<br/>(gemini-2.5-flash)"]
+        Generator["GENERATOR / AI agent<br/>Google Gemini<br/>(gemini-3.8-flash)"]
         Fallback["Offline fallback<br/>_offline_answer()<br/>template, no AI"]
 
-        Retriever -->|"3. top-k relevant songs"| Augmenter
+        Retriever -->|"3. top-k relevant docs"| Augmenter
         Augmenter -->|"4a. context + request"| Generator
         Augmenter -.->|"4b. if no API key"| Fallback
     end
 
-    Catalog --> Retriever
+    Corpus --> Retriever
     Grounding[/"System-prompt guardrail:<br/>recommend ONLY retrieved songs"/] -.->|"constrains"| Generator
 
     Generator -->|"5. grounded recommendation"| Output([Recommendation shown to user])
-    Fallback -->|"5. retrieved songs"| Output
+    Fallback -->|"5. retrieved docs"| Output
 
     subgraph Check["Testing & human checks on AI output"]
         Pytest["pytest — tests/test_rag.py<br/>retrieval + grounding tests"]
@@ -80,16 +83,9 @@ python -m src.main
 Without a key, the app still runs in **retrieval-only mode** (it prints the retrieved
 songs and notes that AI generation is off), so the pipeline works offline.
 
-Example session with a key set:
+See the **[Execution Evidence](#execution-evidence)** section below for real captured runs
+(end-to-end inputs, AI behavior, guardrail, and test output).
 
-```
-You: upbeat pop to get hyped for a workout
-
-1. "Gym Hero" by Max Pulse — pop with an intense mood and very high energy (0.93)
-   at 132 bpm; built for pushing through a workout.
-2. "Sunrise City" by Neon Echo — upbeat, happy pop (energy 0.82, valence 0.84) to
-   keep the momentum going.
-```
 ---
 
 ## Getting Started
@@ -122,6 +118,108 @@ Run the starter tests with:
 ```bash
 pytest
 ```
+---
+
+## Execution Evidence
+
+All output below is **captured from real runs** of the RAG system (`python -m src.main`
+/ `src/rag.py`), not hand-written. At startup the app reports its multi-source corpus:
+
+```
+Sources indexed: songs (10), notes (3)
+AI generation: ON (grounded in the song catalog)
+```
+
+### 1. End-to-end runs (AI / RAG behavior)
+
+**Input A — `chill lofi for studying`**
+
+Retrieved grounding set (best-first, with relevance scores):
+
+```
+[song] Midnight Coding     (relevance 16.5)
+[song] Library Rain        (relevance 16.5)
+[song] Focus Flow          (relevance 9.0)
+[song] Spacewalk Thoughts  (relevance 7.5)
+```
+
+AI answer (Gemini, grounded in the retrieved songs):
+
+```
+1. "Library Rain" by Paper Lanterns — lofi genre, explicit "chill" mood, gentle
+   72 bpm, low energy (0.35), high acousticness (0.86): relaxed and undistracting.
+2. "Midnight Coding" by LoRoom — lofi/chill, steady 78 bpm, low-moderate energy
+   (0.42), strong acousticness (0.71): a calming backdrop for study sessions.
+3. "Focus Flow" by LoRoom — lofi, "focused" mood, smooth 80 bpm, acousticness 0.78.
+```
+
+**Input B — `upbeat pop to get hyped for a workout`** (demonstrates multi-source retrieval)
+
+Retrieved grounding set — note the **custom `notes` document** retrieved alongside songs:
+
+```
+[song]  Sunrise City          (relevance 11.0)
+[song]  Gym Hero              (relevance 11.0)
+[notes] Workout Energy Guide  (relevance 8.0)   <-- custom document source
+[song]  Rooftop Lights        (relevance 7.0)
+```
+
+AI answer (recommends only real catalog songs, informed by the guide note):
+
+```
+1. "Gym Hero" by Max Pulse — intense pop, energy 0.93, 132 bpm, danceability 0.88:
+   matches the workout guide's criteria for high-energy momentum.
+2. "Sunrise City" by Neon Echo — happy pop, energy 0.82, valence 0.84, 118 bpm.
+3. "Rooftop Lights" by Indigo Parade — indie pop, 124 bpm, danceability 0.82.
+```
+
+### 2. Guardrail behavior (grounding — no hallucination)
+
+**Input C — `classical piano concerto for a formal dinner`** (no match in the catalog)
+
+Every retrieved song scores `0.0` (no lexical match), and the system-prompt guardrail
+forbids inventing songs. Instead of hallucinating a classical piece, the AI **honestly
+declines** and only offers real catalog tracks, clearly flagged as approximations:
+
+```
+None of the songs in the current catalog fit your request for a classical piano
+concerto. The available tracks consist of pop, rock, and lofi genres, with no
+classical music represented.
+
+If you just need low-energy background music for a dinner setting, the closest
+options from the catalog would be:
+1. "Library Rain" by Paper Lanterns (lofi, chill, energy 0.35, 72 bpm) — not
+   classical, but quiet gentle background sound.
+2. "Midnight Coding" by LoRoom (lofi, chill, energy 0.42, 78 bpm) — relaxed and
+   downtempo, though distinctly lofi rather than orchestral.
+```
+
+### 3. Reliability — graceful offline fallback (no API key)
+
+If no `GEMINI_API_KEY` is set, the app **never crashes** — it degrades to a
+retrieval-only response:
+
+```
+AI generation available: False
+Retrieved from the corpus (AI generation unavailable):
+  • [song] Midnight Coding by LoRoom [lofi/chill] (relevance 16.5)
+  • [song] Library Rain by Paper Lanterns [lofi/chill] (relevance 16.5)
+  • [song] Focus Flow by LoRoom [lofi/focused] (relevance 9.0)
+  • [song] Spacewalk Thoughts by Orbit Bloom [ambient/chill] (relevance 7.5)
+```
+
+### 4. Automated evaluation (tests)
+
+```
+$ pytest
+...........                                                              [100%]
+11 passed in 0.01s
+```
+
+`tests/test_rag.py` checks retrieval ranking, intent-word expansion, multi-source
+retrieval (songs + custom documents), and that offline answers stay grounded in real
+catalog songs.
+
 ---
 
 ## Sample Recommendation Output

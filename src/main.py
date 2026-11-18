@@ -1,43 +1,50 @@
 """
 Command line runner for the Music Recommender Simulation.
 
-This file helps you quickly run and test your recommender.
+The app is driven by a Retrieval-Augmented Generation (RAG) loop: you type a
+natural-language request, the system retrieves matching songs from the catalog
+(data/songs.csv) and an AI assistant answers grounded in those retrieved songs.
 
-You will implement the functions in recommender.py:
-- load_songs
-- score_song
-- recommend_songs
+See src/rag.py for the retrieval + generation pipeline.
 """
 
-from recommender import load_songs, recommend_songs
+from src.recommender import load_songs
+from src.rag import MusicRAG
 
 
 def main() -> None:
-    songs = load_songs("data/songs.csv") 
+    songs = load_songs("data/songs.csv")
+    if not songs:
+        print("No songs loaded. Check data/songs.csv.")
+        return
 
-    # Taste profile: target values for each feature the recommender compares against.
-    # genre/mood are matched for an exact (or close) match; the rest are numeric
-    # targets (0.0-1.0, except tempo_bpm) compared via distance to the song's value.
-    user_prefs = {
-        "genre": "pop",
-        "mood": "happy",
-        "energy": 0.80,
-        "tempo_bpm": 120,
-        "valence": 0.85,
-        "danceability": 0.80,
-        "acousticness": 0.15,
-    }
+    rag = MusicRAG(songs)
 
-    recommendations = recommend_songs(user_prefs, songs, k=5)
+    print("\n🎵 Music Recommender (RAG mode)")
+    if rag.generation_available:
+        print("AI generation: ON (grounded in the song catalog)")
+    else:
+        print(
+            "AI generation: OFF - set GEMINI_API_KEY to enable grounded "
+            "AI recommendations. Running in retrieval-only mode."
+        )
+    print("Describe what you want to hear, or type 'quit' to exit.")
+    print("Example: 'upbeat pop to get hyped for a workout'\n")
 
-    print("\nTop recommendations:\n")
-    for rec in recommendations:
-        # You decide the structure of each returned item.
-        # A common pattern is: (song, score, explanation)
-        song, score, explanation = rec
-        print(f"{song['title']} - Score: {score:.2f}")
-        print(f"Because: {explanation}")
-        print()
+    while True:
+        try:
+            query = input("You: ").strip()
+        except (EOFError, KeyboardInterrupt):
+            print("\nGoodbye!")
+            break
+
+        if not query:
+            continue
+        if query.lower() in {"quit", "exit", "q"}:
+            print("Goodbye!")
+            break
+
+        print("\n" + rag.answer(query) + "\n")
 
 
 if __name__ == "__main__":

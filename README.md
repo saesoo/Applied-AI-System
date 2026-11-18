@@ -30,6 +30,46 @@ The system chooses which songs to recommend by scoring every candidate, sort by 
 
 ---
 
+## RAG Feature (Retrieval-Augmented Generation)
+
+The app (`python -m src.main`) now runs as a natural-language assistant powered by RAG,
+implemented in `src/rag.py`. Instead of hard-coding a preferences dict, you type a
+request in plain English and the system:
+
+1. **Retrieves** — treats `data/songs.csv` as a knowledge base and pulls the songs most
+   relevant to your request (lexical matching on genre/mood/title/artist, with intent
+   words like "workout" or "studying" expanded to the catalog's labels).
+2. **Augments** — injects *only* those retrieved songs into the prompt as context.
+3. **Generates** — Google Gemini (`gemini-2.5-flash`) writes a recommendation that
+   actively uses the retrieved song data and is instructed to recommend nothing outside
+   the retrieved set, so it can't hallucinate songs that aren't in the catalog.
+
+This meaningfully changes the system's behavior: the AI's answer is *grounded* in
+retrieved catalog data rather than printed alongside a canned list.
+
+### Enabling AI generation
+
+```bash
+export GEMINI_API_KEY=...   # your Google Gemini API key
+python -m src.main
+```
+
+Without a key, the app still runs in **retrieval-only mode** (it prints the retrieved
+songs and notes that AI generation is off), so the pipeline works offline.
+
+Example session with a key set:
+
+```
+You: upbeat pop to get hyped for a workout
+
+1. "Gym Hero" by Max Pulse — pop with an intense mood and very high energy (0.93)
+   at 132 bpm; built for pushing through a workout.
+2. "Sunrise City" by Neon Echo — upbeat, happy pop (energy 0.82, valence 0.84) to
+   keep the momentum going.
+```
+
+---
+
 ## Getting Started
 
 ### Setup

@@ -8,6 +8,10 @@ __pycache__/
 env/
 venv/
 
+# Secrets / API keys
+.env
+.env.*
+
 # OS files
 .DS_Store
 

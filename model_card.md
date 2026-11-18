@@ -2,7 +2,7 @@
 
 ## 1. Model Name  
 
-**VibeMatch 1.0**
+**SongMatch 1.0**
 
 ---
 

@@ -2,10 +2,10 @@
 
 ## Project Summary
 
-- Represent songs and a user "taste profile" as data
-- Design a scoring rule that turns that data into recommendations
-- Evaluate what your system gets right and wrong
-- Reflect on how this mirrors real world AI recommenders
+The Music Recommender Simulation represents each song and a user's "taste profile" as structured
+data, then applies a hand-designed scoring rule that rewards genre/mood matches and closeness on each
+numeric feature to rank every candidate.
+The goal was to show how a recommender turns labeled data into predictions through weighting and ranking — and to evaluate where that scoring approach gets things right and where it introduces bias or blind spots.
 
 ---
 
@@ -30,24 +30,9 @@ The system chooses which songs to recommend by scoring every candidate, sort by 
 
 ---
 
-## RAG Feature (Retrieval-Augmented Generation)
-
-The app (`python -m src.main`) now runs as a natural-language assistant powered by RAG,
-implemented in `src/rag.py`. Instead of hard-coding a preferences dict, you type a
-request in plain English and the system:
-
-1. **Retrieves** — treats `data/songs.csv` as a knowledge base and pulls the songs most
-   relevant to your request (lexical matching on genre/mood/title/artist, with intent
-   words like "workout" or "studying" expanded to the catalog's labels).
-2. **Augments** — injects *only* those retrieved songs into the prompt as context.
-3. **Generates** — Google Gemini (`gemini-2.5-flash`) writes a recommendation that
-   actively uses the retrieved song data and is instructed to recommend nothing outside
-   the retrieved set, so it can't hallucinate songs that aren't in the catalog.
-
-This meaningfully changes the system's behavior: the AI's answer is *grounded* in
-retrieved catalog data rather than printed alongside a canned list.
-
 ### Architecture
+
+The diagram shows the RAG pipeline that drives the app. A user types a request into the interactive loop, the retriever searches the song catalog and pulls the top-k most relevant song using lexical matching plus intent word expansion. Those songs are passed to the Augmenter, which builds a grounding context block, and then to the Generator, which writes the final recommendation.
 
 ```mermaid
 flowchart TD
@@ -105,7 +90,6 @@ You: upbeat pop to get hyped for a workout
 2. "Sunrise City" by Neon Echo — upbeat, happy pop (energy 0.82, valence 0.84) to
    keep the momentum going.
 ```
-
 ---
 
 ## Getting Started
@@ -138,9 +122,6 @@ Run the starter tests with:
 ```bash
 pytest
 ```
-
-You can add more tests in `tests/test_recommender.py`.
-
 ---
 
 ## Sample Recommendation Output
@@ -200,22 +181,11 @@ Because: Genre matches your preferred 'pop'; Energy is close to your target (0.9
 - **Fixed, hand-picked weights**: genre (25) and mood (20) are weighted more heavily than any single numeric feature (11 each) by design choice, not by any learned or validated signal — a different weighting could produce noticeably different rankings for the same catalog.
 - **Cold-start / no personalization over time**: the system has no memory of past recommendations or feedback; every call scores the full catalog from scratch against whatever `user_prefs` is passed in.
 
-You will go deeper on this in your model card.
-
 ---
 
 ## Reflection
 
-Read and complete `model_card.md`:
-
 [**Model Card**](model_card.md)
-
-Write 1 to 2 paragraphs here about what you learned:
-
-- about how recommenders turn data into predictions
-- about where bias or unfairness could show up in systems like this
-
-<!-- Draft reflection below — personalize this to your own experience before submitting. -->
 
 Building this recommender made it clear that "recommendation" is really just scoring and sorting: every song gets reduced to a handful of numbers and labels, the system measures how close those numbers are to a target, adds up the points, and returns whatever comes out on top. There's no understanding happening — `score_song` doesn't know what "happy" music actually sounds like, it just checks whether a string matches and whether a float falls close to another float. That gap between what the system is doing (arithmetic on labeled data) and what it looks like it's doing (understanding taste) is the core trick behind most real-world recommenders too.
 

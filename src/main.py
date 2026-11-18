@@ -11,6 +11,16 @@ See src/rag.py for the retrieval + generation pipeline.
 from src.recommender import load_songs
 from src.rag import MusicRAG
 
+# Load GEMINI_API_KEY (and anything else) from a local .env file if present.
+# .env is gitignored, so the key never gets committed. No-op if python-dotenv
+# isn't installed or there's no .env file.
+try:
+    from dotenv import load_dotenv
+
+    load_dotenv()
+except ImportError:
+    pass
+
 
 def main() -> None:
     songs = load_songs("data/songs.csv")
